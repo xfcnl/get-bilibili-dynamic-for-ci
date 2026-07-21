@@ -1,0 +1,35 @@
+name: Fetch Bilibili Dynamics
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Run fetch script
+        run: npm run fetch
+        env:
+          BILIBILI_UID: ${{ vars.BILIBILI_UID || '3494372658121066' }}
+
+      - name: Commit and push
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add dynamic.json
+          git commit -m "chore: update bilibili dynamics $(date +'%Y-%m-%d')" || echo "No changes"
+          git push
