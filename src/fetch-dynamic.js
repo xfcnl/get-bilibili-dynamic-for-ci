@@ -76,6 +76,12 @@ const dynamics = await page.evaluate(() => {
   });
 });
 
+if (dynamics.length === 0) {
+  console.log('No dynamics found, skipping update.');
+  await browser.close();
+  process.exit(0);
+}
+
 const output = {
   uid: UID,
   fetched_at: new Date().toISOString(),
