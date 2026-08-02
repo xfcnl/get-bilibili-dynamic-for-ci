@@ -26,38 +26,61 @@ const browser = await chromium.launch({
     '--disable-setuid-sandbox',
     '--disable-blink-features=AutomationControlled',
     '--disable-features=IsolateOrigins,site-per-process',
+    '--disable-dev-shm-usage',
   ],
 });
 
-const context = await browser.newContext({
-  userAgent:
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  viewport: { width: 1920, height: 1080 },
-  locale: 'zh-CN',
-  timezoneId: 'Asia/Shanghai',
-});
+const MAX_RETRIES = 3;
 
-const page = await context.newPage();
-page.setDefaultTimeout(30000);
+async function newContext() {
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    viewport: { width: 1920, height: 1080 },
+    locale: 'zh-CN',
+    timezoneId: 'Asia/Shanghai',
+    extraHTTPHeaders: {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Referer': 'https://www.bilibili.com/',
+    },
+  });
+  return context;
+}
 
-const MAX_RETRIES = 2;
+async function warmUpCookies(context) {
+  const page = await context.newPage();
+  try {
+    await page.goto('https://www.bilibili.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+    await sleep(1500);
+  } catch {
+    console.warn('Warm-up navigation failed, continuing without cookies.');
+  }
+  await page.close();
+}
 
 for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-  if (attempt > 1) {
-    console.warn(`Retry ${attempt}/${MAX_RETRIES}...`);
-    await page.goto(URL, { waitUntil: 'load', timeout: 30000 }).catch(() => {
-      console.warn(`Navigation timeout on retry ${attempt}, continuing...`);
-    });
-  } else {
-    await page.goto(URL, { waitUntil: 'load', timeout: 30000 }).catch(() => {
-      console.warn('Navigation timeout, continuing...');
-    });
-  }
+  console.log(`Attempt ${attempt}/${MAX_RETRIES}...`);
 
-  await page.waitForSelector('.bili-dyn-list__item', { timeout: 20000 }).catch(() => {
-    console.warn(`Dynamic items not found (attempt ${attempt}), page may have changed.`);
+  // 每次重试用全新 browser context，避免共用已被风控标记的上下文
+  const context = await newContext();
+  await warmUpCookies(context);
+
+  const page = await context.newPage();
+  page.setDefaultTimeout(30000);
+
+  await page.goto(URL, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {
+    console.warn('Navigation timeout, continuing...');
   });
 
+  await page.waitForSelector('.bili-dyn-list__item', { timeout: 20000 }).catch(() => {
+    console.warn(`Dynamic items not found (attempt ${attempt}), page may be blocked or changed.`);
+  });
+
+  // 触底加载，确保懒加载的列表都渲染出来
   await sleep(2000);
 
   const dynamics = await page.evaluate(() => {
@@ -107,12 +130,13 @@ for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
   });
 
   if (dynamics.length === 0) {
+    await context.close();
     if (attempt < MAX_RETRIES) {
       console.warn('No dynamics loaded, waiting 5s before retry...');
       await sleep(5000);
       continue;
     }
-    console.log('No dynamics found, skipping update.');
+    console.log('No dynamics found after all retries, skipping update.');
     await browser.close();
     process.exit(0);
   }
@@ -139,6 +163,7 @@ for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 
   writeFileSync('dynamic.json', JSON.stringify(output, null, 2));
   console.log(`Updated dynamic.json (${dynamics.length} dynamics total).`);
+  await context.close();
   await browser.close();
   process.exit(0);
 }
